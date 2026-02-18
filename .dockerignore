@@ -1,0 +1,10 @@
+# .dockerignore
+.git
+.vscode
+bin/
+build/
+*.db
+*.db-shm
+*.db-wal
+docker-compose.yml
+README.md

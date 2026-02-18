@@ -3,6 +3,8 @@ package main
 import (
 	"distributedKeyValue/persistence"
 	"distributedKeyValue/server"
+	servicediscovery "distributedKeyValue/service_discovery"
+	twophasecommit "distributedKeyValue/two_phase_commit"
 	"os"
 
 	"github.com/joho/godotenv"
@@ -16,12 +18,17 @@ func main() {
 
 	ownName := os.Getenv("NODE_NAME")
 
-	sqliteModule, err := persistence.NewSqlitePersistence(ownName + "data.sqlite")
+	sqliteModule := persistence.MustNewSqliteTransactionManagerPersistence(ownName + "data.sqlite")
 
 	if err != nil {
 		panic(err)
 	}
 
-	server.StartServer(sqliteModule)
+	twoPhaseCommit := &twophasecommit.TwoPhaseCommit{
+		PersistenceManager: sqliteModule,
+		SDiscovery:         servicediscovery.NewEnvServiceDiscovery(), // we will set this later after we initialize the service discovery module
+	}
+
+	server.StartServer(twoPhaseCommit)
 
 }

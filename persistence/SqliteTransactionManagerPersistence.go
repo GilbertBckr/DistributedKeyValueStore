@@ -3,9 +3,9 @@ package persistence
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
-
-	"golang.org/x/tools/go/analysis/checker"
+	_ "modernc.org/sqlite"
 )
 
 type TransactionState string
@@ -14,6 +14,16 @@ const (
 	TransactionStatePrepared  TransactionState = "prepared"
 	TransactionStateCommitted TransactionState = "committed"
 	TransactionStateAborted   TransactionState = "aborted"
+	TransactionStateOblivious TransactionState = "oblivious"
+)
+
+type TransactionCoordinatorState string
+
+const (
+	TransactionCoordinatorStateOngoing   TransactionCoordinatorState = "waiting"
+	TransactionCoordinatorStateAborted   TransactionCoordinatorState = "aborted"
+	TransactionCoordinatorStateCommitted TransactionCoordinatorState = "committed"
+	TransactionCoordinatorStateCompleted TransactionCoordinatorState = "completed"
 )
 
 type SqliteTransactionManagerPersistence struct {
@@ -39,7 +49,7 @@ const createTransactionManagerTableString = `
 `
 
 func MustNewSqliteTransactionManagerPersistence(connectionString string) *SqliteTransactionManagerPersistence {
-	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)", connectionString)
+	dsn := fmt.Sprintf("%s?_journal_mode=WAL&busy_timeout=5000&_txlock=immediate", connectionString)
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -120,45 +130,135 @@ func (p *SqliteTransactionManagerPersistence) AbortTransaction(context context.C
 	return err
 }
 
-func (p *SqliteTransactionManagerPersistence) TryPerpareTransaction(context context.Context, transaction Transaction) (bool, error) {
+func (p *SqliteTransactionManagerPersistence) TryPrepareTransaction(context context.Context, transaction Transaction, optTx *sql.Tx) (bool, error) {
 
-	state, present, err := p.GetTransactionState(context, transaction.id)
+	var tx *sql.Tx
+	var err error
+	isLocalTx := false // Tracks whether WE created the transaction
 
-	if err != nil {
-		return false, err
+	// 1. Transaction Setup / Injection
+	if optTx != nil {
+		tx = optTx // Use the caller's transaction
+	} else {
+		// Create our own transaction
+		tx, err = p.db.BeginTx(context, nil)
+		if err != nil {
+			panic(fmt.Errorf("failed to begin transaction: %w", err))
+		}
+		isLocalTx = true
+
+		// Guarantee cleanup only if we own the transaction
+		defer tx.Rollback()
 	}
 
-	if present {
-		panic(fmt.Sprintf("transaction with id %s already exists with state %s", transaction.id, state))
+	// 2. Check for existing transaction
+	var existingState TransactionState
+	err = tx.QueryRowContext(context, `SELECT state FROM transactions WHERE id = ?`, transaction.Id).Scan(&existingState)
+
+	if err != nil && err != sql.ErrNoRows {
+		panic(fmt.Errorf("failed to check for existing transaction: %w", err))
+	}
+	if err == nil { // err == nil means a row was found
+		if existingState == TransactionStatePrepared {
+			return true, nil
+		}
+		if existingState == TransactionStateAborted {
+			return false, nil
+		}
+		panic(fmt.Sprintf("Found unexpected state for prepare request with id %s, found state: %s", transaction.Id, existingState))
 	}
 
-	// Check if key is locked by any other transaction, if so return false
-
+	// 3. Check if key is locked by any other transaction
 	checkKeyQuery := `
 		SELECT state FROM transactions WHERE key = ? AND state = ? ORDER BY seq_num DESC LIMIT 1
 	`
-
-	err = p.db.QueryRowContext(context, checkKeyQuery, transaction.key, TransactionStatePrepared).Scan(&state)
+	var state TransactionState
+	err = tx.QueryRowContext(context, checkKeyQuery, transaction.Key, TransactionStatePrepared).Scan(&state)
 
 	if err != nil && err != sql.ErrNoRows {
-		panic(fmt.Errorf("failed to check if key %s is locked by any transaction: %w", transaction.key, err))
+		panic(fmt.Errorf("failed to check if key %s is locked by any transaction: %w", transaction.Key, err))
 	}
 
+	// 4. Branching Logic based on the lock check
 	if err == sql.ErrNoRows {
 		// Insert the transaction with state "prepared"
 		insertQuery := `
-		INSERT INTO transactions (id, state, key, value) VALUES (?, ?, ?, ?)
+			INSERT INTO transactions (id, state, key, value) VALUES (?, ?, ?, ?)
 		`
-		_, err := p.db.ExecContext(context, insertQuery, transaction.id, TransactionStatePrepared, transaction.key, transaction.value)
+		_, err := tx.ExecContext(context, insertQuery, transaction.Id, TransactionStatePrepared, transaction.Key, transaction.Value)
 		if err != nil {
-			panic(fmt.Errorf("failed to insert transaction with id %s: %w", transaction.id, err))
+			panic(fmt.Errorf("failed to insert transaction with id %s: %w", transaction.Id, err))
+		}
+
+		// 5a. Commit only if we created the transaction
+		if isLocalTx {
+			if err = tx.Commit(); err != nil {
+				panic(fmt.Errorf("failed to commit prepared transaction with id %s: %w", transaction.Id, err))
+			}
 		}
 		return true, nil
+
 	} else {
-		// key is locked by another TryPerpareTransaction
-		// abort the transaction and return false
-		p.AbortTransaction(context, transaction.id)
+		// Key is locked by another TryPrepareTransaction.
+		abortQuery := `
+			INSERT INTO transactions (id, state, key, value) VALUES (?, ?, ?, ?)
+		`
+		_, err := tx.ExecContext(context, abortQuery, transaction.Id, TransactionStateAborted, transaction.Key, transaction.Value)
+		if err != nil {
+			panic(fmt.Errorf("could not abort transaction with id %s: %w", transaction.Id, err))
+		}
+
+		// 5b. Commit the aborted state only if we created the transaction
+		if isLocalTx {
+			if err = tx.Commit(); err != nil {
+				panic(fmt.Errorf("failed to commit aborted transaction with id %s: %w", transaction.Id, err))
+			}
+		}
 		return false, nil
 	}
+}
 
+func (p *SqliteTransactionManagerPersistence) TransactionCoordinatorStartTransaction(context context.Context, transaction Transaction, participants []ParticpantDB) (bool, error) {
+
+	queryInsertTransactionCoordinatorEntry := `
+		INSERT INTO transactionManager (id, state, otherNodes) VALUES (?, ?, ?);
+	`
+
+	jsonParticipants, err := json.Marshal(participants)
+
+	if err != nil {
+		panic(fmt.Errorf("failed to marshal participants for transaction coordinator entry: %w", err))
+	}
+
+	tx, err := p.db.BeginTx(context, &sql.TxOptions{Isolation: sql.LevelDefault, ReadOnly: false})
+
+	if err != nil && err != sql.ErrNoRows {
+		panic(fmt.Errorf("failed to begin transaction for inserting transaction coordinator entry: %w", err))
+	}
+
+	// check if transaction can be inserted
+	canCommit, err := p.TryPrepareTransaction(context, transaction, tx)
+
+	if err != nil {
+		tx.Rollback()
+		panic(fmt.Errorf("failed to prepare transaction for inserting transaction coordinator entry: %w", err))
+	}
+
+	if !canCommit {
+		_, err = tx.ExecContext(context, queryInsertTransactionCoordinatorEntry, transaction.Id, TransactionCoordinatorStateAborted, jsonParticipants)
+	} else {
+		_, err = tx.ExecContext(context, queryInsertTransactionCoordinatorEntry, transaction.Id, TransactionCoordinatorStateOngoing, jsonParticipants)
+	}
+
+	if err != nil {
+		tx.Rollback()
+		panic(fmt.Errorf("failed to insert transaction coordinator entry: %w", err))
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		panic(fmt.Errorf("failed to commit transaction for inserting transaction coordinator entry: %w", err))
+	}
+
+	return canCommit, nil
 }

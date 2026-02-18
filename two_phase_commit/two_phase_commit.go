@@ -1,7 +1,7 @@
 package twophasecommit
 
 import (
-	"distributedKeyValue/locking"
+	"context"
 	"distributedKeyValue/persistence"
 	servicediscovery "distributedKeyValue/service_discovery"
 
@@ -9,9 +9,8 @@ import (
 )
 
 type TwoPhaseCommit struct {
-	persistenceManager persistence.TransactionManagerPersistence
-	sDiscovery         servicediscovery.ServiceDiscovery
-	locking            locking.Locking
+	PersistenceManager persistence.TransactionManagerPersistence
+	SDiscovery         servicediscovery.ServiceDiscovery
 }
 
 func getUniqueTransactionId() string {
@@ -21,46 +20,27 @@ func getUniqueTransactionId() string {
 
 }
 
-func (twopc *TwoPhaseCommit) StartNewTransaction(key string, value string) error {
+func (twopc *TwoPhaseCommit) StartNewTransaction(context context.Context, key string, value string) (bool, string, error) {
 	transactionId := getUniqueTransactionId()
 
-	// check if can apply on local node, if not return error to client
-	err := twopc.locking.Lock(key)
-	if err != nil {
-		return err
+	transaction := persistence.Transaction{
+		Id:    transactionId,
+		Key:   key,
+		Value: value,
 	}
 
-	// TODO: parrallelize this part
-
-	particpants := twopc.sDiscovery.GetParticipants()
-
-	for _, participant := range particpants {
-		// send prepare request to participant
-		// if any participant is not ready, return error to client and send abort request to all participants
-		prepared := sendPrepareRequest(participant, transactionId, key, value)
-		if !prepared {
+	participants := twopc.SDiscovery.GetParticipants()
+	participantsWithState := make([]persistence.ParticpantDB, len(participants))
+	for i, participant := range participants {
+		participantsWithState[i] = persistence.ParticpantDB{
+			Participant: participant,
+			State:       persistence.TransactionStateOblivious,
 		}
 	}
 
-	// Send out prepare request to all participants
-	// after getting all prepare responses, if all participants are ready, send commit request to all participants, otherwise send abort request to all participants
+	// We persist the transaction here to the database with state "prepared" and the list of participants. This is necessary to be able to recover from failures during the commit phase.
+	// Next the scheduler can pick up this transaction perform phase 1 of this transaction
+	couldCommit, err := twopc.PersistenceManager.TransactionCoordinatorStartTransaction(context, transaction, participantsWithState)
 
-}
-
-func (twopc *TwoPhaseCommit) AbortTransaction(transactionId string) error {
-}
-
-func sendPrepareRequest(participant string, transactionId string, key string, value string) bool {
-
-	return false
-
-}
-
-func sendAbortRequest(participant string, transactionId string) bool {
-	return false
-}
-
-func sendCommitRequest(participant string, transactionId string) bool {
-
-	return false
+	return couldCommit, transactionId, err
 }

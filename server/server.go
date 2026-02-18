@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"distributedKeyValue/persistence"
+	twophasecommit "distributedKeyValue/two_phase_commit"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -16,7 +16,7 @@ type SetRequest struct {
 	Value string `json:"value"`
 }
 
-func StartServer(database persistence.DataPersistence) {
+func StartServer(transactionManager *twophasecommit.TwoPhaseCommit) {
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -26,25 +26,6 @@ func StartServer(database persistence.DataPersistence) {
 	})
 
 	r.Route("/crud", func(r chi.Router) {
-		r.Get("/{key}", func(w http.ResponseWriter, r *http.Request) {
-			key := chi.URLParam(r, "key")
-			value, ok, err := database.Get(r.Context(), key)
-
-			if err != nil {
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-				return
-			}
-
-			if !ok {
-				// You requested 400, but note that 404 (Not Found) is standard here
-				http.Error(w, "Key not found", http.StatusBadRequest)
-				return
-			}
-
-			// Write the success response
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(value))
-		})
 
 		r.Post("/", func(w http.ResponseWriter, r *http.Request) {
 			var req SetRequest
@@ -62,17 +43,23 @@ func StartServer(database persistence.DataPersistence) {
 				return
 			}
 
-			// 3. Call the database
-			// database.Set signature: func(ctx, key, value) error
-			err := database.Set(r.Context(), req.Key, req.Value)
+			coudlCommit, id, err := transactionManager.StartNewTransaction(r.Context(), req.Key, req.Value)
+
 			if err != nil {
-				// Log the actual error internally here
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				http.Error(w, fmt.Sprintf("Failed to start transaction: %v", err), http.StatusInternalServerError)
 				return
 			}
 
-			// 4. Success Response
-			w.WriteHeader(http.StatusCreated) // 201 Created
+			if !coudlCommit {
+				http.Error(w, "Transaction could not be prepared due to a conflict", http.StatusConflict)
+				return
+			}
+
+			w.Header().Add("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"transactionId": id,
+				"message":       "Transaction prepared successfully, commit phase will be handled by the scheduler",
+			})
 		})
 	})
 

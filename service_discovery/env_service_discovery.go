@@ -8,7 +8,8 @@ import (
 )
 
 type EnvServiceDiscovery struct {
-	participants []Participant
+	participants   []Participant
+	participantMap map[string]*Participant
 }
 
 func NewEnvServiceDiscovery() *EnvServiceDiscovery {
@@ -17,6 +18,12 @@ func NewEnvServiceDiscovery() *EnvServiceDiscovery {
 	EnvServiceDiscovery := &EnvServiceDiscovery{}
 
 	EnvServiceDiscovery.participants = getParticipants()
+
+	EnvServiceDiscovery.participantMap = make(map[string]*Participant)
+
+	for _, participant := range EnvServiceDiscovery.participants {
+		EnvServiceDiscovery.participantMap[participant.ID] = &participant
+	}
 
 	return EnvServiceDiscovery
 }
@@ -44,4 +51,8 @@ func getParticipants() []Participant {
 
 func (e *EnvServiceDiscovery) GetParticipants() []Participant {
 	return e.participants
+}
+
+func (e *EnvServiceDiscovery) GetUrlForParticipant(participantId string) string {
+	return e.participantMap[participantId].Url
 }

@@ -7,7 +7,7 @@ services:
     environment:
       NODE_NAME: kv1
       PORT: "3000"
-      PEERS: "http://kv2:3000,http://kv3:3000"
+      PARTICIPANTS: "http://kv2:3000,http://kv3:3000"
     ports:
       - "3001:3000"
     networks:
@@ -19,7 +19,7 @@ services:
     environment:
       NODE_NAME: kv2
       PORT: "3000"
-      PEERS: "http://kv1:3000,http://kv3:3000"
+      PARTICIPANTS: "http://kv1:3000,http://kv3:3000"
     ports:
       - "3002:3000"
     networks:
@@ -31,7 +31,7 @@ services:
     environment:
       NODE_NAME: kv3
       PORT: "3000"
-      PEERS: "http://kv1:3000,http://kv2:3000"
+      PARTICIPANTS: "http://kv1:3000,http://kv2:3000"
     ports:
       - "3003:3000"
     networks:

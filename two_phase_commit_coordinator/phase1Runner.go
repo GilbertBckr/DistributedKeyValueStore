@@ -16,11 +16,11 @@ type collectVotesPersistenceManager interface {
 	SetTransactionCoordinatorAndOwnParticipantState(context context.Context, id string, state persistence.TransactionCoordinatorState) error
 }
 
-type serviceDiscovery interface {
+type serviceDiscoveryUrlGetter interface {
 	GetUrlForParticipant(participantId string) string
 }
 
-func GetNewPhase1Runner(persistenceManager collectVotesPersistenceManager, sDiscovery serviceDiscovery) func(context.Context) {
+func GetNewPhase1Runner(persistenceManager collectVotesPersistenceManager, sDiscovery serviceDiscoveryUrlGetter) func(context.Context) {
 
 	return func(context context.Context) {
 
@@ -42,7 +42,7 @@ func GetNewPhase1Runner(persistenceManager collectVotesPersistenceManager, sDisc
 	}
 }
 
-func performPhase1ForTransaction(context context.Context, transaction persistence.TransactionAndParticipants, persistenceManager collectVotesPersistenceManager, sDiscovery serviceDiscovery) {
+func performPhase1ForTransaction(context context.Context, transaction persistence.TransactionAndParticipants, persistenceManager collectVotesPersistenceManager, sDiscovery serviceDiscoveryUrlGetter) {
 
 	newState := checkVotesFromParticipantsForTransaction(context, transaction, sDiscovery)
 
@@ -53,7 +53,7 @@ func performPhase1ForTransaction(context context.Context, transaction persistenc
 	}
 }
 
-func checkVotesFromParticipantsForTransaction(context context.Context, transaction persistence.TransactionAndParticipants, sDiscovery serviceDiscovery) persistence.TransactionCoordinatorState {
+func checkVotesFromParticipantsForTransaction(context context.Context, transaction persistence.TransactionAndParticipants, sDiscovery serviceDiscoveryUrlGetter) persistence.TransactionCoordinatorState {
 
 	// TODO: refactor this to send requests in parallel later on
 
@@ -67,7 +67,7 @@ func checkVotesFromParticipantsForTransaction(context context.Context, transacti
 	return persistence.TransactionCoordinatorStateCommitted
 }
 
-func requestVoteFromParticipant(context context.Context, participant persistence.ParticpantDB, transaction persistence.Transaction, sDiscovery serviceDiscovery) bool {
+func requestVoteFromParticipant(context context.Context, participant persistence.ParticpantDB, transaction persistence.Transaction, sDiscovery serviceDiscoveryUrlGetter) bool {
 
 	requestBody, err := json.Marshal(transaction)
 

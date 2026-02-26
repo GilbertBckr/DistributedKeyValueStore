@@ -30,6 +30,9 @@ func StartServer(transactionManager *twophasecommitcoordinator.TwoPhaseCommit, t
 		r.Put("/vote", func(w http.ResponseWriter, r *http.Request) {
 			adapterRequestVote(w, r, transactionParticipant)
 		})
+		r.Put("/ack", func(w http.ResponseWriter, r *http.Request) {
+			adapterAckTransactionResult(w, r, transactionParticipant)
+		})
 	})
 
 	r.Route("/crud", func(r chi.Router) {
@@ -41,6 +44,31 @@ func StartServer(transactionManager *twophasecommitcoordinator.TwoPhaseCommit, t
 	fmt.Println("Starting Server")
 	http.ListenAndServe(":3000", r)
 	fmt.Println("Shutting down")
+}
+
+func adapterAckTransactionResult(w http.ResponseWriter, r *http.Request, transactionParticipant *twophasecommitparticipant.TwoPhaseCommitParticipant) {
+
+	var request twophasecommitcoordinator.AckRequest
+
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4000)).Decode(&request); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if request.TransactionId == "" {
+		http.Error(w, "Transaction ID cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	err := transactionParticipant.HandleAckRequest(r.Context(), request.TransactionId, request.State)
+
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to handle ack request: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Acknowledgement received and processed"))
+
 }
 
 func adaterPostKey(w http.ResponseWriter, r *http.Request, transactionManager *twophasecommitcoordinator.TwoPhaseCommit) {

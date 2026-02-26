@@ -21,6 +21,9 @@ const transactionStatesPath = "transactionsStates.gob"
 func main() {
 
 	err := godotenv.Load()
+	if err != nil {
+		log.Error("Error loading .env file")
+	}
 
 	ownName := os.Getenv("NODE_NAME")
 
@@ -36,9 +39,6 @@ func main() {
 
 	sqliteModule := persistence.MustNewSqliteTransactionManagerPersistence(ownName + "data.sqlite")
 
-	if err != nil {
-		panic(err)
-	}
 	servicediscoveryModule := servicediscovery.NewEnvServiceDiscovery()
 
 	twoPhaseCommitCoordinator := &twophasecommitcoordinator.TwoPhaseCommit{
@@ -50,13 +50,16 @@ func main() {
 		PersistenceManager: sqliteModule,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-
+	// Setup background runners
+	ctxPhase1, cancelPhase1 := context.WithCancel(context.Background())
 	phase1Runner := twophasecommitcoordinator.GetNewPhase1Runner(sqliteModule, servicediscoveryModule)
+	go phase1Runner(ctxPhase1)
+	defer cancelPhase1()
 
-	go phase1Runner(ctx)
-
-	defer cancel()
+	ctxPhase2, cancelPhase2 := context.WithCancel(context.Background())
+	phase2Runner := twophasecommitcoordinator.GetNewPhase2Runner(sqliteModule, servicediscoveryModule)
+	go phase2Runner(ctxPhase2)
+	defer cancelPhase2()
 
 	server.StartServer(twoPhaseCommitCoordinator, twoPhaseCommitParticipant)
 

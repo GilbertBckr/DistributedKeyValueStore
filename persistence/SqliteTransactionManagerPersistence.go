@@ -443,3 +443,57 @@ func (p *SqliteTransactionManagerPersistence) GetTransactionsInPhase1(context co
 	return transactions, nil
 
 }
+
+func (p *SqliteTransactionManagerPersistence) GetTransactionWaitingForAcknowledgement(context context.Context) ([]TransactionCoordinatorInfo, error) {
+	queryGetTransactionWaitingForAck := `SELECT id, state, participants from transactionManager WHERE state in (?,?)`
+
+	rows, err := p.db.QueryContext(context, queryGetTransactionWaitingForAck, TransactionCoordinatorStateCommitted, TransactionCoordinatorStateAborted)
+
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+
+	var transactions []TransactionCoordinatorInfo
+
+	for rows.Next() {
+
+		transaction := TransactionCoordinatorInfo{}
+
+		var jsonParticipants string
+
+		err := rows.Scan(&transaction.Id, &transaction.State, &jsonParticipants)
+
+		if err != nil {
+			slog.Error("failed to scan transaction waiting for acknowledgement", "error", err)
+			continue
+		}
+
+		err = json.Unmarshal([]byte(jsonParticipants), &transaction.Participants)
+
+		if err != nil {
+			slog.Error("Failed to unmarshal participants string: ", jsonParticipants, err)
+			continue
+		}
+
+		transactions = append(transactions, transaction)
+	}
+	return transactions, nil
+}
+
+func (p *SqliteTransactionManagerPersistence) UpdateParticipantAckState(ctx context.Context, transactionId string, newParticipants []ParticpantDB, setDone bool) error {
+
+	jsonParticipants, err := json.Marshal(newParticipants)
+
+	if err != nil {
+		slog.Error("Failed to unmarshal participants string into json", newParticipants, err)
+	}
+
+	queryUpdateTransactionManager := `UPDATE transactionManager SET state = ?, participants = ? WHERE id = ?`
+
+	_, err = p.db.ExecContext(ctx, queryUpdateTransactionManager, TransactionCoordinatorStateCompleted, jsonParticipants, transactionId)
+
+	return err
+
+}

@@ -1,7 +1,7 @@
 # ==========================================
 # Stage 1: The Builder (Compiles the code)
 # ==========================================
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Install git. (Alpine images are minimal and might miss git required for some deps)
 RUN apk add --no-cache git

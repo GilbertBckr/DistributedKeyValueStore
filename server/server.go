@@ -103,7 +103,7 @@ func adapterAckTransactionResult(w http.ResponseWriter, r *http.Request, transac
 	}
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Acknowledgement received and processed"))
+	w.Write([]byte("Final Transaction State received and processed"))
 
 }
 

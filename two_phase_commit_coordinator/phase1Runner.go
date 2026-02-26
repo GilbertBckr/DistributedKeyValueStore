@@ -5,9 +5,9 @@ import (
 	"context"
 	"distributedKeyValue/persistence"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -20,32 +20,51 @@ type serviceDiscoveryUrlGetter interface {
 	GetUrlForParticipant(participantId string) string
 }
 
+var voteHttpClient = &http.Client{
+	Timeout: 2 * time.Second,
+}
+
 func GetNewPhase1Runner(persistenceManager collectVotesPersistenceManager, sDiscovery serviceDiscoveryUrlGetter, channelManager *ChannelManager) func(context.Context) {
 
-	return func(context context.Context) {
+	return func(ctx context.Context) {
 
 		for {
 			// 1. Fetch open transactions
-			transactions, err := persistenceManager.GetTransactionsInPhase1(context)
+			transactions, err := persistenceManager.GetTransactionsInPhase1(ctx)
 			if err != nil {
 				slog.Error("failed to fetch transactions in phase 1", "error", err)
+				// need to wait before retrying to avoid busy looping in case of persistent errors
+				select {
+				case <-ctx.Done():
+					return // Exit immediately if shutting down
+				case <-time.After(200 * time.Millisecond):
+				}
 				continue
 			}
 
-			//TODO: we can optimize this by doing the vote request for all transactions in parallel, but for simplicity we do it sequentially here
+			wg := sync.WaitGroup{}
 
 			for _, transaction := range transactions {
-				PerformPhase1ForTransaction(context, transaction, persistenceManager, sDiscovery, channelManager)
+				wg.Add(1)
+				go func(transaction persistence.TransactionAndParticipants) {
+					defer wg.Done()
+					PerformPhase1ForTransaction(ctx, transaction, persistenceManager, sDiscovery, channelManager)
+				}(transaction)
 			}
+			wg.Wait()
 
-			time.Sleep(200 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return // Exit immediately if shutting down
+			case <-time.After(50 * time.Millisecond):
+			}
 		}
 	}
 }
 
 func PerformPhase1ForTransaction(context context.Context, transaction persistence.TransactionAndParticipants, persistenceManager collectVotesPersistenceManager, sDiscovery serviceDiscoveryUrlGetter, channelManager *ChannelManager) (persistence.TransactionCoordinatorState, error) {
 
-	newState := checkVotesFromParticipantsForTransaction(context, transaction, sDiscovery)
+	newState := checkVotesFromParticipantsParallel(context, transaction, sDiscovery)
 
 	err := persistenceManager.SetTransactionCoordinatorAndOwnParticipantState(context, transaction.Transaction.Id, newState)
 
@@ -61,37 +80,56 @@ func PerformPhase1ForTransaction(context context.Context, transaction persistenc
 }
 
 // Requests a vote from all participants and returns the new state of the transaction coordinator based on the votes, if any participant votes no, the transaction is aborted, otherwise it is committed
-func checkVotesFromParticipantsForTransaction(context context.Context, transaction persistence.TransactionAndParticipants, sDiscovery serviceDiscoveryUrlGetter) persistence.TransactionCoordinatorState {
+func checkVotesFromParticipantsParallel(ctx context.Context, transaction persistence.TransactionAndParticipants, sDiscovery serviceDiscoveryUrlGetter) persistence.TransactionCoordinatorState {
 
-	// TODO: refactor this to send requests in parallel later on
+	numberParticipants := len(transaction.Participants)
 
+	voteResults := make(chan bool, numberParticipants)
+
+	ctx, cancel := context.WithCancel(ctx)
+
+	defer cancel()
+	// Send requests in parallel
 	for _, participant := range transaction.Participants {
-		couldCommit := requestVoteFromParticipant(context, participant, transaction.Transaction, sDiscovery)
+		go func(p persistence.ParticpantDB) {
+			couldCommit := requestVoteFromParticipant(ctx, p, transaction.Transaction, sDiscovery)
+			voteResults <- couldCommit
+		}(participant)
+	}
+
+	//Collect results
+	for i := 0; i < numberParticipants; i++ {
+		couldCommit := <-voteResults
 		if !couldCommit {
+			// Can safely return because the context cancellation will stop all other goroutines that are still waiting for a response from sending their result to the channel
 			return persistence.TransactionCoordinatorStateAborted
 		}
 	}
+
 	return persistence.TransactionCoordinatorStateCommitted
+
 }
 
-func requestVoteFromParticipant(context context.Context, participant persistence.ParticpantDB, transaction persistence.Transaction, sDiscovery serviceDiscoveryUrlGetter) bool {
+func requestVoteFromParticipant(ctx context.Context, participant persistence.ParticpantDB, transaction persistence.Transaction, sDiscovery serviceDiscoveryUrlGetter) bool {
 
 	requestBody, err := json.Marshal(transaction)
 
 	if err != nil {
-		panic(fmt.Errorf("failed to marshal transaction for vote request: %w", err))
+		slog.Error("failed to marshal transaction for vote request", "transactionId", transaction.Id, "participantId", participant.ID, "error", err)
+		return false
 	}
 
 	participantUrl := sDiscovery.GetUrlForParticipant(participant.ID)
 
-	req, err := http.NewRequestWithContext(context, http.MethodPut, participantUrl+"/transaction/vote", bytes.NewBuffer(requestBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, participantUrl+"/transaction/vote", bytes.NewBuffer(requestBody))
 
 	if err != nil {
-		panic(fmt.Errorf("failed to create vote request for participant %s: %w", participant.ID, err))
+		slog.Error("failed to create vote request for participant", "participantId", participant.ID, "error", err)
+		return false
 	}
+	req.Header.Set("Content-Type", "application/json")
 
-	//TODO: add timeout
-	respsonse, err := http.DefaultClient.Do(req)
+	respsonse, err := voteHttpClient.Do(req)
 
 	if err != nil {
 		slog.Warn("failed to send vote request to participant", "participantId", participant.ID, "error", err)

@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"distributedKeyValue/persistence"
@@ -20,7 +22,8 @@ type SetRequest struct {
 
 func StartServer(transactionManager *twophasecommitcoordinator.TwoPhaseCommit, transactionParticipant *twophasecommitparticipant.TwoPhaseCommitParticipant) {
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(ResponseLoggerMiddleware)
+
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "text/html")
 		w.Write([]byte("Hello World!"))
@@ -33,11 +36,41 @@ func StartServer(transactionManager *twophasecommitcoordinator.TwoPhaseCommit, t
 		r.Put("/ack", func(w http.ResponseWriter, r *http.Request) {
 			adapterAckTransactionResult(w, r, transactionParticipant)
 		})
+		r.Get("/status/{transactionId}", func(w http.ResponseWriter, r *http.Request) {
+			transactionId := chi.URLParam(r, "transactionId")
+			status, err := transactionParticipant.GetTransactionStatus(r.Context(), transactionId)
+
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to get transaction status: %v", err), http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Add("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"transactionId": transactionId,
+				"status":        string(status),
+			})
+		})
 	})
 
 	r.Route("/crud", func(r chi.Router) {
 		r.Post("/", func(w http.ResponseWriter, r *http.Request) {
 			adaterPostKey(w, r, transactionManager)
+		})
+		r.Get("/{key}", func(w http.ResponseWriter, r *http.Request) {
+			key := chi.URLParam(r, "key")
+			value, err := twophasecommitparticipant.HandleGetRequest(r.Context(), key, transactionParticipant.PersistenceManager)
+
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to get value for key: %v", err), http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Add("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"key":   key,
+				"value": value,
+			})
 		})
 	})
 
@@ -62,6 +95,7 @@ func adapterAckTransactionResult(w http.ResponseWriter, r *http.Request, transac
 	err := transactionParticipant.HandleAckRequest(r.Context(), request.TransactionId, request.State)
 
 	if err != nil {
+		slog.Error("Failed to handle ack request", "error", err)
 		http.Error(w, fmt.Sprintf("Failed to handle ack request: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -129,4 +163,27 @@ func adapterRequestVote(w http.ResponseWriter, r *http.Request, transactionParti
 		http.Error(w, "Could not prepare transaction due to a conflict", http.StatusConflict)
 	}
 
+}
+
+func ResponseLoggerMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Wrap the original ResponseWriter
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+
+		// Create a buffer to store a copy of the response body
+		var buf bytes.Buffer
+		ww.Tee(&buf)
+
+		// Process the request
+		next.ServeHTTP(ww, r)
+
+		// Log the captured response along with request details
+		slog.Info("HTTP Traffic",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", ww.Status(),
+			"response_bytes", ww.BytesWritten(),
+			"response_body", buf.String(),
+		)
+	})
 }

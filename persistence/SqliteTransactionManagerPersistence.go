@@ -140,30 +140,6 @@ func (p *SqliteTransactionManagerPersistence) InitSchema() error {
 	return err
 }
 
-func (p *SqliteTransactionManagerPersistence) Get(context context.Context, key string) (string, bool, error) {
-	var result string
-	var state TransactionState
-
-	// check if key is locked by any transaction, if so return err
-
-	query := `
-	SELCT value, state FROM keyValue WHERE key = ?
-	JOIN transactions ON keyValue.key = transactions.key ORDER BY transactions.seq_num DESC LIMIT 1
-	`
-
-	err := p.db.QueryRowContext(context, query, key).Scan(&result, &state)
-	if err == sql.ErrNoRows {
-		return "", false, nil
-	} else if err != nil {
-		return "", false, err
-	}
-
-	if state == TransactionStatePrepared {
-		return "", true, fmt.Errorf("key is locked by a prepared transaction")
-	}
-	return result, true, nil
-}
-
 func (p *SqliteTransactionManagerPersistence) GetTransactionState(context context.Context, id string) (TransactionState, bool, error) {
 
 	var state TransactionState
@@ -180,14 +156,82 @@ func (p *SqliteTransactionManagerPersistence) GetTransactionState(context contex
 	return state, true, nil
 }
 
-func (p *SqliteTransactionManagerPersistence) AbortTransaction(context context.Context, id string) error {
-	_, err := p.db.ExecContext(context, "INSERT OR REPLACE INTO transactions (id, state) VALUES (?, ?)", id, TransactionStateAborted)
+func (p *SqliteTransactionManagerPersistence) AbortTransaction(context context.Context, id string, optionalTx *sql.Tx) error {
+
+	var tx *sql.Tx
+
+	if optionalTx != nil {
+		tx = optionalTx
+	} else {
+		var err error
+		tx, err = p.db.BeginTx(context, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for aborting transaction with id %s: %w", id, err)
+		}
+		defer tx.Rollback()
+	}
+
+	_, err := tx.ExecContext(context, "INSERT OR REPLACE INTO transactions (id, state) VALUES (?, ?)", id, TransactionStateAborted)
+
+	if err != nil {
+		return fmt.Errorf("failed to insert aborted transaction with id %s: %w", id, err)
+	}
+
+	if optionalTx == nil {
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction for aborting transaction with id %s: %w", id, err)
+		}
+	}
 
 	return err
 }
 
-func (p *SqliteTransactionManagerPersistence) CommitTransaction(context context.Context, id string) error {
-	_, err := p.db.ExecContext(context, "UPDATE transactions SET state = ? WHERE id = ?", TransactionStateCommitted, id)
+// Set the transaction to committed and and actually insert the key and value into the keyValue table. We can do this in a single transaction to ensure consistency
+func (p *SqliteTransactionManagerPersistence) CommitTransaction(context context.Context, id string, optionalTx *sql.Tx) error {
+
+	var tx *sql.Tx
+
+	if optionalTx != nil {
+		tx = optionalTx
+	} else {
+		var err error
+		tx, err = p.db.BeginTx(context, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for committing transaction with id %s: %w", id, err)
+		}
+		defer tx.Rollback()
+	}
+
+	// First we need to get the key and value for the transaction so that we can insert it into the keyValue table
+	var key, value string
+
+	err := tx.QueryRowContext(context, "SELECT key, value FROM transactions WHERE id = ?", id).Scan(&key, &value)
+
+	if err != nil {
+		return fmt.Errorf("failed to get key and value for transaction with id %s: %w", id, err)
+	}
+	if key == "" || value == "" {
+		return fmt.Errorf("no key and value found for transaction with id %s", id)
+	}
+
+	// Then we insert the key and value into the keyValue table
+	_, err = tx.ExecContext(context, "INSERT INTO keyValue (key, value) VALUES (?, ?) ON CONFLICT DO UPDATE SET value = excluded.value", key, value)
+
+	if err != nil {
+		return fmt.Errorf("failed to insert key and value into keyValue table for transaction with id %s: %w", id, err)
+	}
+
+	_, err = tx.ExecContext(context, "UPDATE transactions SET state = ? WHERE id = ?", TransactionStateCommitted, id)
+
+	if err != nil {
+		return fmt.Errorf("failed to update transaction state to committed for transaction with id %s: %w", id, err)
+	}
+
+	if optionalTx == nil {
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction for committing transaction with id %s: %w", id, err)
+		}
+	}
 
 	return err
 }
@@ -343,25 +387,14 @@ func (p *SqliteTransactionManagerPersistence) SetTransactionCoordinatorAndOwnPar
 	}
 
 	// Update the own participant state in the transactions table
-	var participantState TransactionState
 
 	switch state {
 	case TransactionCoordinatorStateAborted:
-		participantState = TransactionStateAborted
+		p.AbortTransaction(context, id, tx)
 	case TransactionCoordinatorStateCommitted:
-		participantState = TransactionStateCommitted
+		p.CommitTransaction(context, id, tx)
 	default:
-		panic(fmt.Sprintf("unexpected transaction coordinator state %s for transaction with id %s when trying to set own participant state", state, id))
-	}
-
-	updateParticipantQuery := `
-		UPDATE transactions SET state = ? WHERE id = ?
-	`
-
-	_, err = tx.ExecContext(context, updateParticipantQuery, participantState, id)
-
-	if err != nil {
-		return fmt.Errorf("failed to update own participant state for transaction with id %s: %w", id, err)
+		return fmt.Errorf("invalid transaction coordinator state: %s", state)
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -414,7 +447,7 @@ func (p *SqliteTransactionManagerPersistence) GetTransactionsInPhase1(context co
 	rows, err := p.db.QueryContext(context, query, TransactionCoordinatorStateWaiting)
 
 	if err != nil {
-		panic(fmt.Errorf("failed to query transactions in phase 1: %w", err))
+		return nil, fmt.Errorf("failed to query transactions in phase 1: %w", err)
 	}
 
 	defer rows.Close()
@@ -429,13 +462,13 @@ func (p *SqliteTransactionManagerPersistence) GetTransactionsInPhase1(context co
 		err := rows.Scan(&transaction.Transaction.Id, &transaction.Transaction.Key, &transaction.Transaction.Value, &participantString)
 
 		if err != nil {
-			slog.Error("failed to scan transaction in phase 1", "error", err)
+			return nil, fmt.Errorf("failed to scan transaction in phase 1: %w", err)
 		}
 
 		err = json.Unmarshal([]byte(participantString), &transaction.Participants)
 
 		if err != nil {
-			slog.Error("failed to unmarshal participants for transaction in phase 1", "error", err)
+			return nil, fmt.Errorf("failed to unmarshal participants for transaction in phase 1: %w", err)
 		}
 
 		transactions = append(transactions, transaction)
@@ -490,10 +523,49 @@ func (p *SqliteTransactionManagerPersistence) UpdateParticipantAckState(ctx cont
 		slog.Error("Failed to unmarshal participants string into json", newParticipants, err)
 	}
 
-	queryUpdateTransactionManager := `UPDATE transactionManager SET state = ?, participants = ? WHERE id = ?`
+	if setDone {
 
-	_, err = p.db.ExecContext(ctx, queryUpdateTransactionManager, TransactionCoordinatorStateCompleted, jsonParticipants, transactionId)
+		queryUpdateTransactionManager := `UPDATE transactionManager SET state = ?, participants = ? WHERE id = ?`
+
+		_, err = p.db.ExecContext(ctx, queryUpdateTransactionManager, TransactionCoordinatorStateCompleted, jsonParticipants, transactionId)
+
+	} else {
+		queryUpdateTransactionManager := `UPDATE transactionManager SET participants = ? WHERE id = ?`
+
+		_, err = p.db.ExecContext(ctx, queryUpdateTransactionManager, jsonParticipants, transactionId)
+	}
 
 	return err
 
+}
+
+func (p *SqliteTransactionManagerPersistence) Get(ctx context.Context, key string) (string, error) {
+	var value string
+
+	query := `SELECT value FROM keyValue WHERE key = ?`
+
+	err := p.db.QueryRowContext(ctx, query, key).Scan(&value)
+
+	if err == sql.ErrNoRows {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+
+	return value, nil
+}
+func (p *SqliteTransactionManagerPersistence) GetTransactionStatus(ctx context.Context, transactionId string) (TransactionState, error) {
+	var state TransactionState
+
+	query := `SELECT state FROM transactions WHERE id = ?`
+
+	err := p.db.QueryRowContext(ctx, query, transactionId).Scan(&state)
+
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("transaction with id %s not found", transactionId)
+	} else if err != nil {
+		return "", err
+	}
+
+	return state, nil
 }

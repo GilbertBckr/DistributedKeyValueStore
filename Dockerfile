@@ -6,6 +6,7 @@ FROM golang:1.25-alpine AS builder
 # Install git. (Alpine images are minimal and might miss git required for some deps)
 RUN apk add --no-cache git
 RUN apk add curl
+RUN apk add litecli
 
 WORKDIR /app
 

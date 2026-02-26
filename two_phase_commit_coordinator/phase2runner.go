@@ -33,7 +33,7 @@ func GetNewPhase2Runner(persistenceManager Phase2PersistenceManager, sDiscovery 
 				performPhase2ForTransaction(context, transaction, persistenceManager, sDiscovery)
 			}
 
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(400 * time.Millisecond)
 		}
 	}
 }

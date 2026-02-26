@@ -29,6 +29,7 @@ func GetNewPhase1Runner(persistenceManager collectVotesPersistenceManager, sDisc
 			transactions, err := persistenceManager.GetTransactionsInPhase1(context)
 			if err != nil {
 				slog.Error("failed to fetch transactions in phase 1", "error", err)
+				continue
 			}
 
 			//TODO: we can optimize this by doing the vote request for all transactions in parallel, but for simplicity we do it sequentially here
@@ -37,7 +38,7 @@ func GetNewPhase1Runner(persistenceManager collectVotesPersistenceManager, sDisc
 				performPhase1ForTransaction(context, transaction, persistenceManager, sDiscovery)
 			}
 
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(400 * time.Millisecond)
 		}
 	}
 }
@@ -53,14 +54,14 @@ func performPhase1ForTransaction(context context.Context, transaction persistenc
 	}
 }
 
+// Requests a vote from all participants and returns the new state of the transaction coordinator based on the votes, if any participant votes no, the transaction is aborted, otherwise it is committed
 func checkVotesFromParticipantsForTransaction(context context.Context, transaction persistence.TransactionAndParticipants, sDiscovery serviceDiscoveryUrlGetter) persistence.TransactionCoordinatorState {
 
 	// TODO: refactor this to send requests in parallel later on
 
 	for _, participant := range transaction.Participants {
 		couldCommit := requestVoteFromParticipant(context, participant, transaction.Transaction, sDiscovery)
-		if couldCommit {
-		} else {
+		if !couldCommit {
 			return persistence.TransactionCoordinatorStateAborted
 		}
 	}

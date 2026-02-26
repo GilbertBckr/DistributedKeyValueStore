@@ -2,10 +2,12 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"distributedKeyValue/persistence"
 	twophasecommitcoordinator "distributedKeyValue/two_phase_commit_coordinator"
@@ -20,7 +22,7 @@ type SetRequest struct {
 	Value string `json:"value"`
 }
 
-func StartServer(transactionManager *twophasecommitcoordinator.TwoPhaseCommit, transactionParticipant *twophasecommitparticipant.TwoPhaseCommitParticipant) {
+func StartServer(transactionManager *twophasecommitcoordinator.TwoPhaseCommit, transactionParticipant *twophasecommitparticipant.TwoPhaseCommitParticipant, channelManager *twophasecommitcoordinator.ChannelManager) {
 	r := chi.NewRouter()
 	r.Use(ResponseLoggerMiddleware)
 
@@ -55,7 +57,7 @@ func StartServer(transactionManager *twophasecommitcoordinator.TwoPhaseCommit, t
 
 	r.Route("/crud", func(r chi.Router) {
 		r.Post("/", func(w http.ResponseWriter, r *http.Request) {
-			adaterPostKey(w, r, transactionManager)
+			adaterPostKey(w, r, transactionManager, channelManager)
 		})
 		r.Get("/{key}", func(w http.ResponseWriter, r *http.Request) {
 			key := chi.URLParam(r, "key")
@@ -105,7 +107,7 @@ func adapterAckTransactionResult(w http.ResponseWriter, r *http.Request, transac
 
 }
 
-func adaterPostKey(w http.ResponseWriter, r *http.Request, transactionManager *twophasecommitcoordinator.TwoPhaseCommit) {
+func adaterPostKey(w http.ResponseWriter, r *http.Request, transactionManager *twophasecommitcoordinator.TwoPhaseCommit, channelManger *twophasecommitcoordinator.ChannelManager) {
 	var req SetRequest
 
 	// 1. Decode the JSON body
@@ -121,23 +123,49 @@ func adaterPostKey(w http.ResponseWriter, r *http.Request, transactionManager *t
 		return
 	}
 
-	coudlCommit, id, err := transactionManager.StartNewTransaction(r.Context(), req.Key, req.Value)
+	tid := twophasecommitcoordinator.GetUniqueTransactionId()
+
+	channel := make(chan persistence.TransactionCoordinatorState, 1)
+
+	channelManger.Add(tid, channel)
+
+	defer channelManger.Remove(tid)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+
+	defer cancel()
+
+	couldCommit, id, err := transactionManager.StartNewTransaction(r.Context(), tid, req.Key, req.Value)
 
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to start transaction: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	if !coudlCommit {
+	if !couldCommit {
 		http.Error(w, "Transaction could not be prepared due to a conflict", http.StatusConflict)
 		return
 	}
 
-	w.Header().Add("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"transactionId": id,
-		"message":       "Transaction prepared successfully, commit phase will be handled by the scheduler",
-	})
+	select {
+	case result := <-channel:
+		slog.Info("Received transaction result", "transactionId", id, "result", result)
+		if result == persistence.TransactionCoordinatorStateCommitted {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Transaction committed successfully"))
+		} else if result == persistence.TransactionCoordinatorStateAborted {
+			http.Error(w, "Transaction was aborted", http.StatusBadRequest)
+		} else {
+			panic(fmt.Sprintf("Received unknown transaction coordinator state: %s", result))
+		}
+
+	case <-ctx.Done():
+		w.Header().Add("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"transactionId": id,
+			"message":       "Transaction prepared successfully, commit phase will be handled by the scheduler",
+		})
+	}
 }
 
 func adapterRequestVote(w http.ResponseWriter, r *http.Request, transactionParticipant *twophasecommitparticipant.TwoPhaseCommitParticipant) {

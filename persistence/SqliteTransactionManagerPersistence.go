@@ -250,7 +250,7 @@ func (p *SqliteTransactionManagerPersistence) TryPrepareTransaction(context cont
 		// Create our own transaction
 		tx, err = p.db.BeginTx(context, nil)
 		if err != nil {
-			panic(fmt.Errorf("failed to begin transaction: %w", err))
+			return false, err
 		}
 		isLocalTx = true
 

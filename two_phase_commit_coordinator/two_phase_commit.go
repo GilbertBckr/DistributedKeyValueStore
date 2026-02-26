@@ -21,15 +21,14 @@ type TwoPhaseCommit struct {
 	SDiscovery         serviceDiscoveryStartTransaction
 }
 
-func getUniqueTransactionId() string {
+func GetUniqueTransactionId() string {
 	// using UUID here can later migrate to more reasonable solution as hybrid per node logical clock etc.
 
 	return uuid.New().String()
 
 }
 
-func (twopc *TwoPhaseCommit) StartNewTransaction(context context.Context, key string, value string) (bool, string, error) {
-	transactionId := getUniqueTransactionId()
+func (twopc *TwoPhaseCommit) StartNewTransaction(context context.Context, transactionId string, key string, value string) (bool, string, error) {
 
 	transaction := persistence.Transaction{
 		Id:    transactionId,

@@ -50,9 +50,12 @@ func main() {
 		PersistenceManager: sqliteModule,
 	}
 
+	// Setup channel manager
+	channelManager := twophasecommitcoordinator.NewChannelManager()
+
 	// Setup background runners
 	ctxPhase1, cancelPhase1 := context.WithCancel(context.Background())
-	phase1Runner := twophasecommitcoordinator.GetNewPhase1Runner(sqliteModule, servicediscoveryModule)
+	phase1Runner := twophasecommitcoordinator.GetNewPhase1Runner(sqliteModule, servicediscoveryModule, channelManager)
 	go phase1Runner(ctxPhase1)
 	defer cancelPhase1()
 
@@ -61,6 +64,6 @@ func main() {
 	go phase2Runner(ctxPhase2)
 	defer cancelPhase2()
 
-	server.StartServer(twoPhaseCommitCoordinator, twoPhaseCommitParticipant)
+	server.StartServer(twoPhaseCommitCoordinator, twoPhaseCommitParticipant, channelManager)
 
 }

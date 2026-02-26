@@ -20,7 +20,7 @@ type serviceDiscoveryUrlGetter interface {
 	GetUrlForParticipant(participantId string) string
 }
 
-func GetNewPhase1Runner(persistenceManager collectVotesPersistenceManager, sDiscovery serviceDiscoveryUrlGetter) func(context.Context) {
+func GetNewPhase1Runner(persistenceManager collectVotesPersistenceManager, sDiscovery serviceDiscoveryUrlGetter, channelManager *ChannelManager) func(context.Context) {
 
 	return func(context context.Context) {
 
@@ -35,23 +35,29 @@ func GetNewPhase1Runner(persistenceManager collectVotesPersistenceManager, sDisc
 			//TODO: we can optimize this by doing the vote request for all transactions in parallel, but for simplicity we do it sequentially here
 
 			for _, transaction := range transactions {
-				performPhase1ForTransaction(context, transaction, persistenceManager, sDiscovery)
+				PerformPhase1ForTransaction(context, transaction, persistenceManager, sDiscovery, channelManager)
 			}
 
-			time.Sleep(400 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 		}
 	}
 }
 
-func performPhase1ForTransaction(context context.Context, transaction persistence.TransactionAndParticipants, persistenceManager collectVotesPersistenceManager, sDiscovery serviceDiscoveryUrlGetter) {
+func PerformPhase1ForTransaction(context context.Context, transaction persistence.TransactionAndParticipants, persistenceManager collectVotesPersistenceManager, sDiscovery serviceDiscoveryUrlGetter, channelManager *ChannelManager) (persistence.TransactionCoordinatorState, error) {
 
 	newState := checkVotesFromParticipantsForTransaction(context, transaction, sDiscovery)
 
 	err := persistenceManager.SetTransactionCoordinatorAndOwnParticipantState(context, transaction.Transaction.Id, newState)
 
 	if err != nil {
-		slog.Error("failed to update transaction state after phase 1", "transactionId", transaction.Transaction.Id, "error", err)
+		slog.Error("failed to update transaction state after collecting votes", "transactionId", transaction.Transaction.Id, "error", err)
+		return "", err
 	}
+
+	channelManager.NotifyHandler(transaction.Transaction.Id, newState)
+
+	return newState, err
+
 }
 
 // Requests a vote from all participants and returns the new state of the transaction coordinator based on the votes, if any participant votes no, the transaction is aborted, otherwise it is committed

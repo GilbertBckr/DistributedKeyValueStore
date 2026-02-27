@@ -8,24 +8,38 @@ Our project is very simple and should not be used for production rather it was a
 The basic structure is compromised of multiple nodes.
 Each node is a go program. A client that wants to read the value for a key or write a value for a key can connect to any of the nodes in the cluster.
 For each write the node that received the write request becomes the coordinator for the commit of this request.
-It coordinates the commit of the transaction across all the nodes in the cluster using two-phase-commit [Wikipedia](https://en.wikipedia.org/wiki/Two-phase_commit_protocol).
+It coordinates the commit of the transaction across all the nodes in the cluster using two-phase-commit [2PC Wikipedia](https://en.wikipedia.org/wiki/Two-phase_commit_protocol).
 ![highLevlArch](./docs/assets/highlevelView.drawio.png)
 ### Lifecycle of a Transaction
-To begin a new transaction a client sends a write request to any of the nodes in the cluster, this node becomes the coordinator for this transaction.
-The coordinator then starts the two-phase-commit protocol by generating a unique id.
-It uses a shared map to register a channel for this transaction id, this channel will be used to send the result of the transaction back to the request handler that is waiting for the result of the transaction.
-A timeout is registered for the transaction, if the timeout is reached before the transaction is completed then the request handler will return a _202_ response with the transaction id so the client can request the state of the transaction in the future
-After that the handler writes the transaction to the database with the state 'waiting'.
-This way we have durable state for the transaction and we can recover from crashes.
 
-A go routine called _phase 1 runner_ is responsible for polling the database for transactions in the 'waiting' state and starting the first phase of the two-phase-commit protocol by sending vote requests to all the nodes in the cluster.
-If all the nodes vote 'yes' then the coordinator updates the transaction state to 'committed' and saves the key-value pair to the local database
-If the node is unreachable or votes no it updates the transaction state to 'aborted'.
-Generally a node will only vote 'no' if it has a lock on the key that is being written by another transaction, this way we can ensure that we do not have race conditions.
-Either way the routine will check if there is a channel registered for this transaction id and if there is it will send the result of the transaction to this channel so the request handler can return the result to the client.
-Below you will find a sequence diagram for the lifecycle of a transaction with the synchronous response model and the asynchronous response model.
+When a client sends a write request to any node in the cluster, that node dynamically assumes the role of **Coordinator** for that specific transaction. The transaction then flows through the following asynchronous lifecycle:
 
-### Synchronous Response Model:
+**1. Initialization & Durability**
+The Coordinator initiates the Two-Phase Commit (2PC) protocol by generating a unique transaction ID. Before making any network calls, it persists the transaction to the local SQLite database in the `waiting` state. This guarantees durable state; if the node crashes immediately after this step, the transaction can be safely recovered.
+
+**2. Channel Registration & Blocking**
+The HTTP Request Handler registers a Go channel in a thread-safe, shared in-memory map, keyed by the transaction ID. The handler then blocks, waiting for a signal on this channel, while a timeout ticks down. 
++ If the timeout is reached before the transaction completes, the handler stops waiting and returns a `202 Accepted` response to the client. The client can use the transaction ID to poll for the final status later.
+
+**3. Phase 1: Voting (The Phase 1 Runner)**
+Completely decoupled from the HTTP handler, a background goroutine called the _Phase 1 Runner_ continuously polls the database for transactions in the `waiting` state. It broadcasts a "Vote Request" (Prepare) to all other participant nodes in the cluster.
+* **Commit:** If all nodes vote 'Yes', the Coordinator updates the local transaction state to `committed` and saves the key-value pair to the local database.
+* **Abort:** If any node votes 'No' (typically because it already holds a local lock on that key) or is unreachable, the Coordinator updates the state to `aborted`.
+
+**4. Client Notification**
+Immediately after making the Commit/Abort decision, the _Phase 1 Runner_ checks the shared map for an active channel matching the transaction ID. If the channel exists (meaning the HTTP handler hasn't timed out yet), the runner pushes the final state into the channel. The HTTP handler wakes up and synchronously returns the final result (e.g., `200 OK` or `409 Conflict`) to the client.
+
+**5. Phase 2: Acknowledgement & Consistency**
+After the Coordinator makes the final commit or abort decision in Phase 1, the transaction is handed off to a secondary background goroutine: the **Phase 2 Runner**. 
+
+This runner is strictly responsible for guaranteeing global consistency. It continuously polls the local database for decided transactions and broadcasts the final decision to all participant nodes. 
+
+Because network partitions happen and nodes can crash, this is a highly critical phase of the Two-Phase Commit protocol. The Phase 2 Runner is designed to indefinitely retry broadcasting the decision until it receives a successful acknowledgement from every single participant. 
+
+
+Below you will find the sequence diagrams illustrating both the happy-path synchronous response case and the timeout/polling fallback case.
+
+### Synchronous Response Case:
 ```mermaid
 sequenceDiagram
     autonumber
@@ -64,7 +78,7 @@ sequenceDiagram
         P2->>DB: Update State -> 'completed'
     end
 ```
-### Asynchronous Response Model:
+### Asynchronous Response Case:
 ```mermaid
 sequenceDiagram
     autonumber
@@ -107,14 +121,23 @@ sequenceDiagram
         deactivate H
     end
 ```
-After having decided the result of the transaction in phase 1, a second go routine called _phase 2 runner_ is responsible for making sure that all the nodes in the cluster acknowledge the decision of the coordinator by broadcasting the decision to all the nodes and waiting for their acknowledgement, once all the acknowledgements are received the transaction state is updated to 'completed' and can be removed from the database in the future.
-This is the critical part of the two-phase-commit because we have to retry broadcasting the decision until all the nodes acknowledge it, otherwise we might end up in a situation where some nodes have committed the transaction while others have not, which would lead to an inconsistent state across the cluster.
 
-### Concurrency Control
-To ensure that we do not have race conditions when multiple transactions are trying to access the same key we will use a simple locking mechanism.
-When a transaction is in the 'waiting' state it will acquire a lock on the key it wants to write, this way we can ensure that no other transaction can write to the same key until the first transaction is either committed or aborted.
-If two transactions are trying to write to the same key at the same time on different nodes each of them will acquire a lock on their respective nodes.
-Each _phase 1 runner_ will then request the votes from the other nodes, because each transaction will have one node that will vote 'no' because it has a lock on the key both transaction will be aborted.
+### Concurrency Control & Conflict Resolution
+To prevent race conditions when multiple transactions attempt to access the same key simultaneously, we rely on a combination of local database constraints and the Two-Phase Commit (2PC) voting mechanism.
+
+**Local Locking Mechanism:**
+When a transaction enters the `prepared` state on a node, it acquires a local lock on the target key. Rather than using in-memory application locks, we enforce this at the database level using a SQLite partial unique index (`UNIQUE INDEX ON transactions(key) WHERE state = 'prepared'`). This guarantees that no other transaction can prepare or write to that specific key on this node until the active transaction is either committed or aborted.
+
+**Distributed Conflict Resolution (Mutual Abort):**
+In a distributed environment, a race condition can occur if two different clients attempt to write to the same key on two different coordinator nodes at the exact same time. 
+1. Node A creates Transaction 1 and acquires a local lock on the key.
+2. Node B creates Transaction 2 and acquires a local lock on the exact same key.
+3. Node A's _Phase 1 Runner_ requests a vote from Node B. 
+4. Node B's _Phase 1 Runner_ requests a vote from Node A.
+
+Because Node B already holds a local lock for Transaction 2, it will vote "No" to Node A's request. Conversely, Node A will vote "No" to Node B's request. 
+
+This results in a safe **mutual abort**. Both transactions are rejected, and neither is allowed to commit. Both clients will receive an aborted response, ensuring absolute data consistency across the cluster without requiring a centralized lock manager.
 
 ### Overview of the components and their interactions
 ![componentDiagram](./docs/assets/components.drawio.png)
@@ -175,13 +198,14 @@ We needed a mechanism to retry the broadcast indefinitely until all participants
 
 
 
-### Usage of ACID database for durable state
-As the main purpose of this project was to learn about two-phase-commit we wanted to save us the trouble of implementing our own durable storage engine.
-Therefore we decided to use an existing ACID compliant database to store the state of the transactions, this way we can ensure that we have durable state for the transactions and we can recover from crashes without having to worry about the consistency of the data.
-In our current implementation we are using SQLite as the database, however we could easily switch to another database that is ACID compliant if we wanted to.
-One might wonder why the ACID compliance is important for our use case.
-Atomicity is important because in one transaction on our database we rely on writing the actual data of the transaction as well as the metadata in the same transaction, if we do not have atomicity then we might end up in a situation where we have the data of the transaction written to the database but not the metadata or vice versa, which would lead to an inconsistent state of the transaction and we would not be able to recover from it without help from the client.
+### ACID Database Storage
+As the main purpose of this project was to learn about the Two-Phase Commit (2PC) protocol, we decided against implementing our own storage engine from scratch. Instead, we rely on an existing ACID-compliant database to safely manage transaction states. 
 
-The Consistency is important because it helps in ensuring that only one transaction can write to a key at a time, if we do not have consistency then we might end up in a situation where two transactions are trying to write to the same key at the same time and both of them succeed, which would lead to an inconsistent state of the data and we would not be able to recover from it.
+Currently, we use an embedded SQLite database. However, because our persistence layer is abstracted and decoupled by interfaces, we could easily swap this out for another SQL database like PostgreSQL in the future.
 
-The Durability is important because we use the database to store the state of the transactions and their respective metadata, if we do not have durability then we might lose the state of the transactions in case of a crash and we would not be able to recover from it.
+Relying on strict ACID compliance is absolutely critical for the safety of our 2PC implementation:
+
+* **Atomicity:** In a single database transaction, we must write both the actual key-value data *and* the 2PC metadata (like the transaction state). Atomicity guarantees this is an "all-or-nothing" operation. If it fails midway, the database safely rolls back, preventing a corrupted state where data is written but the metadata is lost.
+* **Consistency:** Consistency ensures the database strictly enforces our protocol rules. By using features like `UNIQUE` partial indexes and `BEFORE UPDATE` triggers, the database physically rejects invalid state transitions (e.g., trying to move a transaction from 'aborted' back to 'committed', or trying to prepare the same key twice). 
+* **Isolation:** Because our Go server processes many HTTP requests concurrently, multiple goroutines might try to lock the same key at the exact same millisecond. Isolation ensures these concurrent requests do not interfere with one another, preventing race conditions and double-writes.
+* **Durability:** We use the database as the ultimate source of truth for crash recovery. If the coordinator node loses power during Phase 1 or Phase 2, Durability guarantees that the committed transaction states and participant votes are safely written to disk. When the server restarts, our background runners can read this durable state and seamlessly resume the protocol exactly where it left off.

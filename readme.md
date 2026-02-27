@@ -37,7 +37,7 @@ sequenceDiagram
     participant P2 as Phase 2 Runner
     participant PN as Participant Nodes
 
-    rect rgb(240, 248, 255)
+    rect rgba(240, 248, 255, 0.2)
         Note over C, DB: Initiation
         C->>H: Request Write (Key, Value)
         activate H
@@ -45,7 +45,7 @@ sequenceDiagram
         H-->>H: Block and wait on Go channel or timeout
     end
 
-    rect rgb(230, 255, 230)
+    rect rgb(230, 255, 230, 0.2)
         Note over DB, PN: Phase 1: Voting
         P1->>DB: Poll for 'waiting' transactions
         P1->>PN: Broadcast Vote Request [HTTP PUT]
@@ -56,7 +56,7 @@ sequenceDiagram
         deactivate H
     end
 
-    rect rgb(255, 250, 205)
+    rect rgb(255, 250, 205, 0.2)
         Note over DB, PN: Phase 2: Acknowledgement
         P2->>DB: Poll for 'committed' / 'aborted' transactions missing Acks
         P2->>PN: Broadcast  state [HTTP]
@@ -75,7 +75,7 @@ sequenceDiagram
     participant P1 as Phase 1 Runner
     participant PN as Participant Nodes
 
-    rect rgb(255, 240, 240)
+    rect rgba(255, 240, 240, 0.2)
         Note over C, DB: Initiation
         C->>H: Request Write (Key, Value)
         activate H
@@ -84,7 +84,7 @@ sequenceDiagram
         H-->>H: Block and wait on Go channel
     end
 
-    rect rgb(255, 250, 205)
+    rect rgba(255, 250, 205, 0.2)
         Note over DB, PN: Phase 1: Voting
         P1->>DB: Poll for 'waiting' transactions
         P1->>PN: Broadcast Vote Request
@@ -97,7 +97,7 @@ sequenceDiagram
         
         Note over H, P1: Channel is gone. No message sent.
     end
-    rect rgb(230, 255, 230)
+    rect rgba(230, 255, 230, 0.2)
         Note over C, DB: Client Requests state of their transaction
         C->>H: Request Status of Transaction Id
         activate H
@@ -121,7 +121,6 @@ Each _phase 1 runner_ will then request the votes from the other nodes, because 
 
 ### Endpoint Summary
 
-### Endpoints Documentation
 
 | Endpoint | Method | Description | Request Body / Params | Success Response | Error Responses |
 | :--- | :--- | :--- | :--- | :--- | :--- |

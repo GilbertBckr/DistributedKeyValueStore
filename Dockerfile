@@ -3,10 +3,8 @@
 # ==========================================
 FROM golang:1.26-alpine AS builder
 
-# Install git. (Alpine images are minimal and might miss git required for some deps)
-RUN apk add --no-cache git
-RUN apk add curl
-RUN apk add litecli
+# Install git, curl, litecli, AND the required CGO dependencies (gcc, musl-dev)
+RUN apk add --no-cache git curl litecli gcc musl-dev
 
 WORKDIR /app
 
@@ -19,19 +17,18 @@ RUN go mod download
 # 2. Copy Source & Build
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o main .
+# Build with CGO enabled and statically link the C libraries
+RUN CGO_ENABLED=1 GOOS=linux go build -a -ldflags="-w -s -extldflags '-static'" -o main .
 
 # ==========================================
 # Stage 2: The Runner (Final small image)
 # ==========================================
 FROM alpine:latest
 
-
 WORKDIR /app
-# Copy the binary from the builder stage
+
+# Copy the statically linked binary from the builder stage
 COPY --from=builder /app/main .
-
-
 
 # Expose the application port
 EXPOSE 3000

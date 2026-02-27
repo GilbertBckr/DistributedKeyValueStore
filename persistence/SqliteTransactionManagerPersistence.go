@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"strings"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type TransactionState string
@@ -100,9 +100,9 @@ const createUniquePreparedKeyIndexString = `
 `
 
 func MustNewSqliteTransactionManagerPersistence(connectionString string) *SqliteTransactionManagerPersistence {
-	dsn := fmt.Sprintf("%s?_journal_mode=WAL&busy_timeout=5000&_txlock=immediate", connectionString)
+	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate", connectionString)
 
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		panic(err)
 	}

@@ -67,6 +67,12 @@ func PerformPhase1ForTransaction(context context.Context, transaction persistenc
 		slog.Error("failed to update transaction state after collecting votes", "transactionId", transaction.Transaction.Id, "error", err)
 		return "", err
 	}
+	slog.Info("collected votes for transaction, new state determined",
+		"transactionId", transaction.Transaction.Id,
+		"newState", newState,
+		"key", transaction.Transaction.Key,
+		"value", transaction.Transaction.Value,
+	)
 
 	channelManager.NotifyHandler(transaction.Transaction.Id, newState)
 

@@ -10,6 +10,7 @@ services:
       - "3001:3000"
     networks:
       - kvnet
+    restart: on-failure
 
   kv2:
     build: .
@@ -22,6 +23,7 @@ services:
       - "3002:3000"
     networks:
       - kvnet
+    restart: on-failure
 
   kv3:
     build: .
@@ -34,6 +36,33 @@ services:
       - "3003:3000"
     networks:
       - kvnet
+    restart: on-failure
+
+
+  chaos-monkey:
+      image: alpine
+      depends_on:
+        - kv1
+        - kv2
+        - kv3
+      networks:
+        - kvnet
+      stop_signal: SIGKILL
+      entrypoint: >
+        /bin/sh -c "
+        apk add --no-cache curl;
+        while true; do
+          WAIT_TIME=$$(( (RANDOM % 5) + 1 ));
+          echo \"Waiting $$WAIT_TIME seconds...\";
+          sleep $$WAIT_TIME;
+          
+          # Pick a random node (kv1, kv2, or kv3)
+          TARGET_NUM=$$(( (RANDOM % 3) + 1 ));
+          TARGET=\"kv$$TARGET_NUM\";
+          
+          echo \"Sending poison pill to $$TARGET...\";
+          curl -X POST http://$$TARGET:3000/die || true; 
+        done"
 
 networks:
   kvnet:

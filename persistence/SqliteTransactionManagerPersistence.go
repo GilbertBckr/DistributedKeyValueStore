@@ -540,20 +540,31 @@ func (p *SqliteTransactionManagerPersistence) UpdateParticipantAckState(ctx cont
 
 }
 
-func (p *SqliteTransactionManagerPersistence) Get(ctx context.Context, key string) (string, error) {
+func (p *SqliteTransactionManagerPersistence) GetWithLockCheck(ctx context.Context, key string) (string, bool, error) {
+	query := `
+		SELECT
+			COALESCE(kv.value, '') AS value,
+			EXISTS(
+				SELECT 1 FROM transactions t
+				WHERE t.key = ? AND t.state = ?
+			) AS locked
+		FROM (SELECT 1) AS dummy
+		LEFT JOIN keyValue kv ON kv.key = ?
+	`
+
 	var value string
+	var locked bool
 
-	query := `SELECT value FROM keyValue WHERE key = ?`
-
-	err := p.db.QueryRowContext(ctx, query, key).Scan(&value)
-
-	if err == sql.ErrNoRows {
-		return "", nil
-	} else if err != nil {
-		return "", err
+	err := p.db.QueryRowContext(ctx, query, key, TransactionStatePrepared, key).Scan(&value, &locked)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read key %s with lock check: %w", key, err)
 	}
 
-	return value, nil
+	if locked {
+		return "", true, nil
+	}
+
+	return value, false, nil
 }
 func (p *SqliteTransactionManagerPersistence) GetTransactionStatus(ctx context.Context, transactionId string) (TransactionState, error) {
 	var state TransactionState

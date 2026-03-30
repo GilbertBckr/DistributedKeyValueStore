@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"distributedKeyValue/persistence"
@@ -29,6 +30,11 @@ func StartServer(transactionManager *twophasecommitcoordinator.TwoPhaseCommit, t
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "text/html")
 		w.Write([]byte("Hello World!"))
+	})
+
+	r.Post("/die", func(w http.ResponseWriter, r *http.Request) {
+		slog.Info("Received /die request, shutting down...")
+		os.Exit(1)
 	})
 
 	r.Route("/transaction", func(r chi.Router) {
@@ -61,10 +67,15 @@ func StartServer(transactionManager *twophasecommitcoordinator.TwoPhaseCommit, t
 		})
 		r.Get("/{key}", func(w http.ResponseWriter, r *http.Request) {
 			key := chi.URLParam(r, "key")
-			value, err := twophasecommitparticipant.HandleGetRequest(r.Context(), key, transactionParticipant.PersistenceManager)
+			value, locked, err := twophasecommitparticipant.HandleGetRequest(r.Context(), key, transactionParticipant.PersistenceManager)
 
 			if err != nil {
 				http.Error(w, fmt.Sprintf("Failed to get value for key: %v", err), http.StatusInternalServerError)
+				return
+			}
+
+			if locked {
+				http.Error(w, fmt.Sprintf("Key '%s' is currently locked by an active transaction", key), http.StatusConflict)
 				return
 			}
 
@@ -76,9 +87,9 @@ func StartServer(transactionManager *twophasecommitcoordinator.TwoPhaseCommit, t
 		})
 	})
 
-	fmt.Println("Starting Server")
+	slog.Info("Starting Server")
 	http.ListenAndServe(":3000", r)
-	fmt.Println("Shutting down")
+	slog.Info("Shutting down")
 }
 
 func adapterAckTransactionResult(w http.ResponseWriter, r *http.Request, transactionParticipant *twophasecommitparticipant.TwoPhaseCommitParticipant) {

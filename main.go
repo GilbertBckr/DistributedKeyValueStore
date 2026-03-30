@@ -22,7 +22,7 @@ func main() {
 
 	err := godotenv.Load()
 	if err != nil {
-		log.Error("Error loading .env file")
+		log.Warn("No .env file present (fine for compse setup)")
 	}
 
 	ownName := os.Getenv("NODE_NAME")

@@ -2,13 +2,24 @@
 
 PORTS=(3001 3002 3003)
 
-echo "Starting parallel load tests with randomized values..."
+  hey \
+    -m POST \
+    -z 18s \
+    -q 1 \
+    -c 1 \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d "{\"key\": \"key_1\", \"value\": \"value_1\"}" \
+    -t 3 \
+    "http://localhost:3001/crud" > "results_port1_key1.txt" 2>&1 &
+
+echo "Starting parallel load tests with randomized values for exactly 15 seconds..."
 
 for PORT in "${PORTS[@]}"; do
   for i in {1..5}; do
     
     # 1. Generate a random offset between 1 and 100
-    OFFSET=$(( RANDOM % 100 + 1 ))
+    OFFSET=$(( $RANDOM % 100 + 1 ))
     
     # 2. Add the offset to 'i' to get a mismatched value index
     VAL_INDEX=$(( i + OFFSET ))
@@ -18,16 +29,19 @@ for PORT in "${PORTS[@]}"; do
     # 3. Inject both variables into the JSON payload
     hey \
       -m POST \
-      -n 100 \
+      -z 18s \
+      -q 1 \
+      -c 1 \
       -H "Accept: application/json" \
       -H "Content-Type: application/json" \
       -d "{\"key\": \"key_$i\", \"value\": \"value_$VAL_INDEX\"}" \
-      http://localhost:$PORT/crud > "results_port${PORT}_key${i}.txt" 2>&1 &
+      -t 3 \
+      "http://localhost:$PORT/crud" > "results_port${PORT}_key${i}.txt" 2>&1 &
       
   done
 done
 
-echo "All 15 batches fired simultaneously! Waiting for them to finish..."
+echo "All 15 batches fired simultaneously! Waiting 18 seconds for them to finish..."
 
 wait
 

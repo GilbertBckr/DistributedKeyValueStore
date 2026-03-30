@@ -160,10 +160,11 @@ func adaterPostKey(w http.ResponseWriter, r *http.Request, transactionManager *t
 		}
 
 	case <-ctx.Done():
+		w.WriteHeader(http.StatusAccepted)
 		w.Header().Add("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"transactionId": id,
-			"message":       "Transaction prepared successfully, commit phase will be handled by the scheduler",
+			"message":       "Transaction received successfully, transaction will be handled by the scheduler",
 		})
 	}
 }

@@ -53,11 +53,6 @@ func GetNewPhase1Runner(persistenceManager collectVotesPersistenceManager, sDisc
 			}
 			wg.Wait()
 
-			select {
-			case <-ctx.Done():
-				return // Exit immediately if shutting down
-			case <-time.After(50 * time.Millisecond):
-			}
 		}
 	}
 }

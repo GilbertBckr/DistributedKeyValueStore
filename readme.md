@@ -2,6 +2,9 @@
 This is a simple distributed key-value-store using two-phase-commit to make atomic writes across nodes.
 Our project is very simple and should not be used for production rather it was a fun project to learn more about two-phase-commit in practice.
 
+1. [Architecture](#architecture)
+2. [Test Setup](#test-setup)
+
 
 ## Architecture
 
@@ -147,11 +150,12 @@ This results in a safe **mutual abort**. Both transactions are rejected, and nei
 
 | Endpoint | Method | Description | Request Body / Params | Success Response | Error Responses |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `/crud/` | `POST` | Initiates a new transaction to write a key-value pair, initiating the 2PC process. This is the client-facing write endpoint. | JSON: `SetRequest` (`{"key": "...", "value": "..."}`) | `200 OK` or `202 Accepted` (if timeout occurs) | `400 Bad Request`, `409 Conflict`, `500 Internal Server Error` |
-| `/crud/{key}` | `GET` | Retrieves the committed value for a given key. | URL Param: `key` | `200 OK` (JSON: `{"key": "...", "value": "..."}`) | `500 Internal Server Error` |
+| `/crud/` | `POST` | Initiates a new transaction to write a key-value pair, initiating the 2PC process. This is the client-facing write endpoint. | JSON: `SetRequest` (`{"key": "...", "value": "..."}`) | `200 OK` or `202 Accepted` (if internal timeout occurs) | `400 Bad Request`, `409 Conflict`, `500 Internal Server Error` |
+| `/crud/{key}` | `GET` | Retrieves the committed value for a given key. Returns `409 Conflict` if the key is currently locked by a prepared transaction (2PC in progress). | URL Param: `key` | `200 OK` (JSON: `{"key": "...", "value": "..."}`) | `409 Conflict` (key locked), `500 Internal Server Error` |
 | `/transaction/vote` | `PUT` | Receives a request from a coordinator to prepare a transaction (Phase 1 of 2PC). | JSON: `persistence.Transaction` object | `200 OK` (Text: "Prepared") | `400 Bad Request`, `409 Conflict`, `500 Internal Server Error` |
 | `/transaction/ack` | `PUT` | Receives the final decision (commit/abort) from the coordinator (Phase 2 of 2PC). | JSON: `twophasecommitcoordinator.AckRequest` object | `200 OK` (Text: "Final Transaction State received and processed") | `400 Bad Request`, `500 Internal Server Error` |
 | `/transaction/status/{transactionId}` | `GET` | Retrieves the current status of a specific transaction by its ID. | URL Param: `transactionId` | `200 OK` (JSON: `{"transactionId": "...", "status": "..."}`) | `500 Internal Server Error` |
+| `/die` | `POST` | Exits the current program |  | No Response | No Response |
 
 
 
@@ -209,3 +213,39 @@ Relying on strict ACID compliance is absolutely critical for the safety of our 2
 * **Consistency:** Consistency ensures the database strictly enforces our protocol rules. By using features like `UNIQUE` partial indexes and `BEFORE UPDATE` triggers, the database physically rejects invalid state transitions (e.g., trying to move a transaction from 'aborted' back to 'committed', or trying to prepare the same key twice). 
 * **Isolation:** Because our Go server processes many HTTP requests concurrently, multiple goroutines might try to lock the same key at the exact same millisecond. Isolation ensures these concurrent requests do not interfere with one another, preventing race conditions and double-writes.
 * **Durability:** We use the database as the ultimate source of truth for crash recovery. If the coordinator node loses power during Phase 1 or Phase 2, Durability guarantees that the committed transaction states and participant votes are safely written to disk. When the server restarts, our background runners can read this durable state and seamlessly resume the protocol exactly where it left off.
+
+
+# Test Setup
+
+Since proving practical distributed systems correct is hard we cannot certainly confirm the correctness of this system and its consistency guarantees.
+This outlines our approach in trying to make reasonable strategies to ensure correctness.
+Our invariant to test is, that all nodes must be strongly consistent
+This means that, if they return a value it must be the same as all other nodes. Nodes may not respond (unavailable due to failure injector) or may return a locked response in case they are still processing the transaction without violating this invariant.
+But they may never return an outdated value.
+For the test setup a cluster of three instances is created in the [docker-compose.yaml](./docker-compose.yaml).
+Additionally a failure injector is added to the cluster that continously calls the `/die`endpoint of the nodes in the cluster.
+
+The [test.sh](./test.sh) file generates load and writes to random keys on random nodes thereby simulating usage of the key-value store.
+As too many concurrent requests on the same key can livelock the system as the two-phase-commit protocol mandates that both writes will be aborted we intentionally limited the frequency of writes.
+While doing this one can execute the [consistency-check.sh](./consistency-check.sh) file to monitor the consistency of reads for a specified key.
+The problem of course being, that this is also only a heuristic as delay in the requests can make it problematic to get a read from all nodes at the exact same time.
+With the current setup our experiments show that the store stays consistent and does not return the wrong value.
+Of course, it may return a locked result when the key is currently being processed in a transaction or a node may be unresponsive due to the failure injector.
+During our experiments we found out that this method reliably detected inconsistencies when we removed the check for a lock on the read endpoint for a key.
+
+
+Command to start consistency check for keys `key_1` through `key_10`
+```bash
+while true; do                                                                                                                                                                                                   ✘ 2  22.13.1   14:47:25  ▓▒░
+  for i in {1..10}; do
+    OUTPUT=$(./consistency-check.sh "key_$i" 2>&1)
+      echo "$OUTPUT"
+      echo ""
+  done
+  sleep 0.5
+done
+```
+
+
+
+

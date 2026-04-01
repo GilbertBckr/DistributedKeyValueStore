@@ -25,10 +25,16 @@ while true; do
   echo "   -> Node :${NODE_2} receiving [${KEY_2}=${VAL_2}]"
 
   # 3. Fire both requests concurrently
-  http --ignore-stdin post ":${NODE_1}/crud" key="${KEY_1}" value="${VAL_1}" --timeout=2 > /dev/null &
+  curl -s -X POST "http://localhost:${NODE_1}/crud/" \
+    -H "Content-Type: application/json" \
+    -d "{\"key\":\"${KEY_1}\",\"value\":\"${VAL_1}\"}" \
+    --max-time 2 > /dev/null &
   PID_1=$!
 
-  http --ignore-stdin post ":${NODE_2}/crud" key="${KEY_2}" value="${VAL_2}" --timeout=2 > /dev/null &
+  curl -s -X POST "http://localhost:${NODE_2}/crud/" \
+    -H "Content-Type: application/json" \
+    -d "{\"key\":\"${KEY_2}\",\"value\":\"${VAL_2}\"}" \
+    --max-time 2 > /dev/null &
   PID_2=$!
 
   # 4. Wait for both to complete
